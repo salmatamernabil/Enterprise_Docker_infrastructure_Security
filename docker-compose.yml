@@ -1,0 +1,129 @@
+services:
+  mariadb:
+    image: mariadb:11
+    user: "999:999"
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets: [db_password, db_root_password]
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    tmpfs: [/tmp, /run/mysqld]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 0.50
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  memcached:
+    image: memcached:1.6-alpine
+    user: "11211:11211"
+    restart: unless-stopped
+    command: ["memcached", "-m", "64"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.25
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "echo stats | nc -w1 127.0.0.1 11211 | grep -q uptime"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  rabbitmq:
+    image: rabbitmq:3.13
+    user: "999:999"
+    restart: unless-stopped
+    entrypoint: ["/etc/rabbitmq-custom/entrypoint.sh"]
+    environment:
+      RABBITMQ_USER: ${RABBITMQ_USER}
+    secrets: [rabbitmq_password]
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/entrypoint.sh:/etc/rabbitmq-custom/entrypoint.sh:ro
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-custom.conf:ro
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 0.50
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  tomcat:
+    build: ./tomcat
+    user: "10001:10001"
+    restart: unless-stopped
+    secrets: [db_password, rabbitmq_password]
+    depends_on:
+      mariadb:   { condition: service_healthy }
+      memcached: { condition: service_healthy }
+      rabbitmq:  { condition: service_healthy }
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /usr/local/tomcat/temp:uid=10001,gid=10001
+      - /usr/local/tomcat/logs:uid=10001,gid=10001
+      - /usr/local/tomcat/work:uid=10001,gid=10001
+      - /usr/local/tomcat/conf/Catalina:uid=10001,gid=10001  
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.0
+    networks: [frontend, backend]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  nginx:
+    build: ./nginx
+    restart: unless-stopped
+    ports: ["80:8080"]          # the ONLY published port
+    depends_on:
+      tomcat: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.25
+    networks: [frontend]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  frontend:
+  backend:
+    internal: true            # no outside access to DB / cache / broker
+
+volumes:
+  db_data:
+  rabbitmq_data:
+
+secrets:
+  db_password:        { file: ./secrets/db_password.txt }
+  db_root_password:   { file: ./secrets/db_root_password.txt }
+  rabbitmq_password:  { file: ./secrets/rabbitmq_password.txt }
